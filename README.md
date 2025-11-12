@@ -14,7 +14,7 @@ CatInteractiveAR/
 
 #### วิธีติดตั้ง
 1. Clone โปรเจกต์
-``` git clone <repo-url> ```
+``` git clone https://github.com/sSODAs/Cat_Interactive_AR.git ```
 
 2. เปิด Unity Hub แล้วเพิ่มโปรเจกต์
 
