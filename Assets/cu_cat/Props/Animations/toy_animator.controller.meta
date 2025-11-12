@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 459d4aa5f9b149d4fa882a2d9dd87e36
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Props/Animations/toy_animator.controller
+  uploadId: 50546

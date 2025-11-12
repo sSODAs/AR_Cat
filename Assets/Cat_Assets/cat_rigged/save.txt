@@ -1,0 +1,392 @@
+using System.IO;
+using System.Collections.Generic;
+using TMPro;
+using System.Collections;
+using UnityEngine;
+using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
+using Unity.Collections;
+using UnityEngine.Networking;
+using Mediapipe.Unity;
+using Mediapipe.Tasks.Core;
+using Mediapipe.Tasks.Vision.HandLandmarker;
+using Mediapipe.Tasks.Vision.Core;
+using System;
+using Mediapipe;
+
+public class HandARController : MonoBehaviour
+{
+    [Header("AR Foundation")]
+    public ARCameraManager cameraManager;
+    public ARTrackedImageManager trackedImageManager;
+
+    [Header("Target (Cat Model)")]
+    private GameObject activeCatModel;
+    private Animator activeCatAnimator;
+
+    [Header("AR Object (AR Toy/Particle System)")]
+    public GameObject arCatToy;
+
+    [Header("Debug UI")]
+    public TextMeshProUGUI debugText;
+
+    [Header("MediaPipe Model")]
+    public string modelName = "hand_landmarker.task";
+
+    [Header("Hand Skeleton Debug")]
+    public bool drawHandLines = false;
+    public Material lineMaterial;
+    public float lineWidth = 0.005f;
+    [Tooltip("สเกลความลึกของจุดมือ (ยิ่งน้อยยิ่งมือแบนลง)")]
+    public float depthScale = 0.5f;
+
+    [Header("Interaction Settings")]
+    public bool enableInteraction = true;
+    public float detectInterval = 0.08f;
+    public bool isCameraMirrored = true;
+
+    [Header("Tuning")]
+    public float smoothingFactor = 0.6f;
+    public float minDistance = 0.25f;
+    public float maxDistance = 3.0f;
+
+    public struct SimpleLandmark { public float x, y, z; public SimpleLandmark(float x, float y, float z) { this.x = x; this.y = y; this.z = z; } }
+
+    private float lastDetectTime = 0f;
+    private HandLandmarker handLandmarker;
+    private Camera arCamera;
+    private LineRenderer handLineRenderer;
+    private string actualModelPath;
+
+    // ตัวแปรสำหรับ Anchor ใหม่
+    private GameObject catAnchorObject; // ตัวนี้จะทำหน้าที่เป็นจุดตรึง
+    private bool isCatAnchored = false;
+
+    // *** ตัวแปรใหม่สำหรับการลด GC Allocations ***
+    private NativeArray<byte> preallocatedBuffer;
+    private int requiredBufferSize = 0;
+    private XRCpuImage.ConversionParams lastConversionParams;
+    // **********************************************
+
+    private void OnDisable()
+    {
+        if (cameraManager != null) cameraManager.frameReceived -= OnCameraFrameReceived;
+        if (trackedImageManager != null) trackedImageManager.trackedImagesChanged -= OnTrackedImagesChanged;
+        if (handLandmarker != null) { try { handLandmarker.Close(); } catch { } handLandmarker = null; }
+
+        // *** ล้าง NativeArray ที่ถูกสร้างไว้ล่วงหน้าเมื่อปิดการใช้งาน ***
+        if (preallocatedBuffer.IsCreated)
+        {
+            preallocatedBuffer.Dispose();
+        }
+        // ***************************************************************
+    }
+
+    IEnumerator Start()
+    {
+        debugText?.SetText("Initializing...");
+
+        if (cameraManager == null) { debugText?.SetText("Error: cameraManager not assigned"); yield break; }
+        if (trackedImageManager == null) { debugText?.SetText("Error: TrackedImageManager not assigned!"); yield break; }
+
+        arCamera = cameraManager.GetComponentInChildren<Camera>();
+        if (arCamera == null) { debugText?.SetText("Error: AR Camera not found!"); yield break; }
+        if (arCatToy != null) arCatToy.SetActive(false);
+
+        if (drawHandLines)
+        {
+            GameObject lineObj = new GameObject("HandDebugLine");
+            lineObj.transform.SetParent(transform);
+            handLineRenderer = lineObj.AddComponent<LineRenderer>();
+            handLineRenderer.material = lineMaterial ?? new Material(Shader.Find("Sprites/Default"));
+            handLineRenderer.startWidth = lineWidth;
+            handLineRenderer.endWidth = lineWidth;
+            handLineRenderer.useWorldSpace = true;
+            handLineRenderer.enabled = false;
+        }
+
+        yield return new WaitUntil(() => cameraManager.permissionGranted);
+        if (cameraManager.subsystem != null && !cameraManager.subsystem.running) cameraManager.subsystem.Start();
+        if (cameraManager.subsystem == null || !cameraManager.subsystem.currentConfiguration.HasValue) { debugText?.SetText("Error: AR Camera config not found"); yield break; }
+
+        // Load MediaPipe model (โค้ดส่วนนี้ยังคงเดิม)
+        debugText?.SetText("Loading AI Model...");
+        string streamingAssetsPath = Path.Combine(Application.streamingAssetsPath, modelName);
+        actualModelPath = Path.Combine(Application.persistentDataPath, modelName);
+        if (!File.Exists(actualModelPath))
+        {
+            using (var www = UnityWebRequest.Get(streamingAssetsPath))
+            {
+                yield return www.SendWebRequest();
+                if (www.result != UnityWebRequest.Result.Success) { debugText?.SetText($"AI MODEL LOAD FAILED: {www.error}"); yield break; }
+                try { File.WriteAllBytes(actualModelPath, www.downloadHandler.data); } catch (Exception e) { debugText?.SetText($"Write model failed: {e.Message}"); yield break; }
+            }
+        }
+
+        if (!File.Exists(actualModelPath)) { debugText?.SetText("AI FILE NOT FOUND"); yield break; }
+
+        var baseOptions = new BaseOptions(modelAssetPath: actualModelPath);
+        var options = new HandLandmarkerOptions(
+            baseOptions: baseOptions,
+            runningMode: Mediapipe.Tasks.Vision.Core.RunningMode.LIVE_STREAM,
+            numHands: 1,
+            minHandDetectionConfidence: 0.7f,
+            minHandPresenceConfidence: 0.7f,
+            minTrackingConfidence: 0.5f,
+            resultCallback: OnHandLandmarkerResult
+        );
+
+        try { handLandmarker = HandLandmarker.CreateFromOptions(options); debugText?.SetText("AI LOADED"); }
+        catch (Exception e) { debugText?.SetText($"AI FAILED: {e.Message}"); yield break; }
+
+        trackedImageManager.trackedImagesChanged += OnTrackedImagesChanged;
+        cameraManager.frameReceived += OnCameraFrameReceived;
+    }
+
+    private void OnCameraFrameReceived(ARCameraFrameEventArgs eventArgs)
+    {
+        if (Time.time - lastDetectTime < detectInterval) return;
+        lastDetectTime = Time.time;
+
+        if (handLandmarker == null) { debugText?.SetText("NO HAND MODEL"); return; }
+
+        // 1. ลองรับภาพ CPU ล่าสุด
+        if (!cameraManager.TryAcquireLatestCpuImage(out XRCpuImage cpuImage))
+        {
+            // ไม่ควรใช้ debugText ในทุกเฟรมถ้าล้มเหลว
+            // debugText?.SetText("NO CPU IMAGE"); 
+            return;
+        }
+
+        try
+        {
+            // 2. ตั้งค่า Conversion Params
+            var conversionParams = new XRCpuImage.ConversionParams(
+                cpuImage,
+                TextureFormat.RGBA32,
+                XRCpuImage.Transformation.None
+            );
+
+            // 3. ตรวจสอบขนาด Buffer และจัดสรร/นำกลับมาใช้ซ้ำ
+            int currentRequiredSize = cpuImage.GetConvertedDataSize(conversionParams);
+
+            if (currentRequiredSize > requiredBufferSize || !preallocatedBuffer.IsCreated)
+            {
+                // ถ้าขนาดเปลี่ยนไปหรือยังไม่ได้สร้าง ให้ล้างของเดิมและสร้างใหม่
+                if (preallocatedBuffer.IsCreated) preallocatedBuffer.Dispose();
+                requiredBufferSize = currentRequiredSize;
+                // ใช้ Allocator.Persistent เพื่อสร้างครั้งเดียวและล้างเมื่อ OnDisable
+                preallocatedBuffer = new NativeArray<byte>(requiredBufferSize, Allocator.Persistent);
+                // debugText?.SetText($"New Buffer Size: {requiredBufferSize}"); // สำหรับ Debug
+            }
+
+            // 4. แปลงภาพโดยใช้ Buffer ที่ถูกสร้างไว้ล่วงหน้า
+            // *สำคัญ: ใช้ buffer.Slice(0, currentRequiredSize) ในการ Convert
+            cpuImage.Convert(conversionParams, preallocatedBuffer.Slice(0, currentRequiredSize));
+
+            // 5. สร้าง Mediapipe Image โดยชี้ไปที่ข้อมูลใน NativeArray
+            // *สำคัญ: ใช้ preallocatedBuffer, ไม่มีการ Copy ข้อมูลใหม่ลงใน Heap ของ C#
+            var image = new Mediapipe.Image(
+                ImageFormat.Types.Format.Srgba,
+                conversionParams.outputDimensions.x,
+                conversionParams.outputDimensions.y,
+                conversionParams.outputDimensions.x * 4,
+                preallocatedBuffer
+            );
+
+            long ts = (long)(cpuImage.timestamp * 1000.0);
+            handLandmarker.DetectAsync(image, ts);
+        }
+        catch (Exception e)
+        {
+            debugText?.SetText($"CONVERT FAILED: {e.Message}");
+        }
+        finally
+        {
+            // 6. Dispose XRCpuImage ทุกครั้งเพื่อคืนทรัพยากร
+            cpuImage.Dispose();
+        }
+    }
+
+    private void OnHandLandmarkerResult(HandLandmarkerResult result, Mediapipe.Image image, long timestamp)
+    {
+        UnityMainThread.Enqueue(() =>
+        {
+            if (activeCatModel == null)
+            {
+                debugText?.SetText("Waiting for cat target...");
+                return;
+            }
+
+            try
+            {
+                if (result.handLandmarks == null || result.handLandmarks.Count == 0)
+                {
+                    debugText?.SetText("NO HAND DETECTED");
+                    arCatToy?.SetActive(false);
+                    if (drawHandLines && handLineRenderer != null) handLineRenderer.enabled = false;
+                    PlayCatIdle();
+                    return;
+                }
+
+                var firstHand = result.handLandmarks[0];
+                if (firstHand.landmarks.Count <= 8)
+                {
+                    debugText?.SetText("LANDMARKS incomplete");
+                    return;
+                }
+
+                debugText?.SetText("HAND DETECTED");
+
+                var fingerTip = firstHand.landmarks[8];
+
+                float catDistance = Vector3.Distance(arCamera.transform.position, activeCatModel.transform.position);
+                catDistance = Mathf.Clamp(catDistance, minDistance, maxDistance);
+
+                Vector3 screenPos = new Vector3(
+                    (isCameraMirrored ? 1f - fingerTip.x : fingerTip.x) * UnityEngine.Screen.width,
+                    (1f - fingerTip.y) * UnityEngine.Screen.height,
+                    catDistance + fingerTip.z * depthScale
+                );
+
+                Vector3 fingerWorldPos = arCamera.ScreenToWorldPoint(screenPos);
+
+                UpdateCatRotation(fingerWorldPos);
+
+                // ... (โค้ด Draw hand lines เหมือนเดิม) ...
+                if (drawHandLines && handLineRenderer != null)
+                {
+                    handLineRenderer.enabled = true;
+                    int maxPoints = 10;
+                    int step = Mathf.Max(1, firstHand.landmarks.Count / maxPoints);
+                    int posCount = (firstHand.landmarks.Count + step - 1) / step;
+                    handLineRenderer.positionCount = posCount;
+
+                    for (int i = 0, j = 0; i < firstHand.landmarks.Count; i += step, j++)
+                    {
+                        var lm = firstHand.landmarks[i];
+                        float zFinal = catDistance + lm.z * depthScale;
+                        zFinal = Mathf.Clamp(zFinal, minDistance, maxDistance);
+
+                        Vector3 posScreen = new Vector3(
+                            (isCameraMirrored ? 1f - lm.x : lm.x) * UnityEngine.Screen.width,
+                            (1f - lm.y) * UnityEngine.Screen.height,
+                            zFinal
+                        );
+
+                        handLineRenderer.SetPosition(j, arCamera.ScreenToWorldPoint(posScreen));
+                    }
+                }
+                else if (handLineRenderer != null)
+                {
+                    handLineRenderer.enabled = false;
+                }
+            }
+            catch (Exception e)
+            {
+                debugText?.SetText($"Result error: {e.Message}");
+            }
+        });
+    }
+
+    private void PlayCatIdle()
+    {
+        if (activeCatAnimator == null) return;
+        activeCatAnimator.SetTrigger("Idle");
+    }
+
+    private void UpdateCatRotation(Vector3 fingerWorldPos)
+    {
+        if (activeCatModel == null || catAnchorObject == null) return;
+
+        // 1. หาทิศทางใน World Space (จาก Anchor ไปยังมือ)
+        Vector3 worldDirection = fingerWorldPos - catAnchorObject.transform.position;
+
+        // 2. แปลงทิศทาง World Space ให้เป็น Local Space ของ Anchor
+        Vector3 localDirection = catAnchorObject.transform.InverseTransformDirection(worldDirection);
+
+        // 3. เราสนใจแค่การหันซ้าย-ขวา (แกน Y) 
+        localDirection.y = 0;
+        if (localDirection.sqrMagnitude < 0.0001f) return;
+
+        // 4. สร้าง Rotation เป้าหมาย (ใน Local Space ของ Anchor)
+        Quaternion localTargetRotation = Quaternion.LookRotation(localDirection);
+
+        // 5. ใช้ Local Rotation ของ activeCatModel
+        activeCatModel.transform.localRotation = Quaternion.Slerp(
+            activeCatModel.transform.localRotation,
+            localTargetRotation,
+            Time.deltaTime * 5f
+        );
+    }
+
+    // +++ FUNCTION เดิม: HandleImageAdded +++
+    IEnumerator HandleImageAdded(ARTrackedImage newImage)
+    {
+        // 1. หน่วงเวลา 1 เฟรม เพื่อให้ AR Foundation จัดวางตำแหน่งก่อน
+        yield return null;
+
+        // 2. หน่วงเวลาเพิ่มเล็กน้อยเพื่อให้ตำแหน่งเสถียร 
+        yield return new WaitForSeconds(0.2f);
+
+        // 3. ตรวจสอบสถานะ: ต้องแน่ใจว่า Marker ถูกติดตามแล้ว
+        if (newImage.trackingState != TrackingState.Tracking)
+        {
+            Debug.Log("Image found, but not tracking yet. Aborting Anchor.");
+            yield break;
+        }
+
+        debugText?.SetText("CAT FOUND & ANCHORED!");
+
+        // **ขั้นตอนการ Anchor ที่ถูกหน่วงเวลา**
+        catAnchorObject = new GameObject("Cat_Anchor");
+        catAnchorObject.transform.position = newImage.transform.position;
+        catAnchorObject.transform.rotation = newImage.transform.rotation;
+
+        activeCatModel = newImage.gameObject;
+        var trackedImageComponent = activeCatModel.GetComponent<ARTrackedImage>();
+
+        activeCatModel.transform.SetParent(catAnchorObject.transform, worldPositionStays: false);
+
+        if (trackedImageComponent != null) Destroy(trackedImageComponent);
+
+        activeCatModel.transform.localPosition = Vector3.zero;
+        activeCatModel.transform.localRotation = Quaternion.identity;
+
+        activeCatAnimator = activeCatModel.GetComponent<Animator>();
+        if (activeCatAnimator != null)
+        {
+            activeCatAnimator.applyRootMotion = false;
+        }
+        activeCatModel.SetActive(true);
+        isCatAnchored = true;
+    }
+
+
+    // +++ FUNCTION เดิม: OnTrackedImagesChanged +++
+    private void OnTrackedImagesChanged(ARTrackedImagesChangedEventArgs eventArgs)
+    {
+        // เมื่อเจอรูปใหม่
+        foreach (var newImage in eventArgs.added)
+        {
+            if (isCatAnchored) continue;
+            StartCoroutine(HandleImageAdded(newImage));
+        }
+
+        // เมื่อรูปหายไปจากจอ
+        foreach (var removedImage in eventArgs.removed)
+        {
+            if (isCatAnchored && catAnchorObject != null)
+            {
+                if (activeCatModel != null && activeCatModel.transform.parent == catAnchorObject.transform)
+                {
+                    debugText?.SetText("CAT LOST (Destroying Anchor).");
+                    Destroy(catAnchorObject);
+                    activeCatModel = null;
+                    activeCatAnimator = null;
+                    isCatAnchored = false;
+                }
+            }
+        }
+    }
+}

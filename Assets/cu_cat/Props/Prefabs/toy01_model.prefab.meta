@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 19ac0f7ba0e101a4fa0f4b00ca679a3e
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Props/Prefabs/toy01_model.prefab
+  uploadId: 50546

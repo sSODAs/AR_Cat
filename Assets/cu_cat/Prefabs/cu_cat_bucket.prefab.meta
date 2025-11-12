@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 42f5ac56b315eae4998bcb8476595028
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Prefabs/cu_cat_bucket.prefab
+  uploadId: 50546

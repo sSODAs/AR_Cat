@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 28021fe0c7d5b10498dfa1e7c39030b7
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Prefabs/Materials/cu_cat_col_low.mat
+  uploadId: 50546

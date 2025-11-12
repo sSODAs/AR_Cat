@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 7347580e788a72e44a08c1c727b7e0e8
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Materials/cu_cat_mt.mat
+  uploadId: 50546

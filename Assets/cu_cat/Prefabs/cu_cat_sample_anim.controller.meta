@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: cf12d23c6e8ce30419ff238f1bd46e99
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 10767
+  packageName: Cu Cat
+  packageVersion: 1.5
+  assetPath: Assets/cu_cat/Prefabs/cu_cat_sample_anim.controller
+  uploadId: 50546
